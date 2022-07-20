@@ -13,11 +13,30 @@
 #include "driver/uart.h"
 #include "string.h"
 #include "driver/gpio.h"
+#include <stdio.h>
+#include "sdkconfig.h"
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "esp_event.h"
+#include "esp_ota_ops.h"
+#include "esp_http_client.h"
+#include "esp_flash_partitions.h"
+#include "esp_partition.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "errno.h"
 
 static const int RX_BUF_SIZE = 1024;
+static uint8_t s_led_state = 0;
+static uint8_t s_led_freq = 2;
+
 
 #define TXD_PIN (GPIO_NUM_4)
 #define RXD_PIN (GPIO_NUM_5)
+#define BLINK_GPIO 2
+
 
 void init(void) {
     const uart_config_t uart_config = {
@@ -68,9 +87,41 @@ static void rx_task(void *arg)
     free(data);
 }
 
+static void blink_task(void *arg)
+{
+    while (1) {
+        gpio_set_level(BLINK_GPIO, s_led_state);
+        s_led_state = !s_led_state;
+        uint16_t delayPeriod = 500/s_led_freq;
+        vTaskDelay(delayPeriod / portTICK_PERIOD_MS);
+    }
+}
+
 void app_main(void)
 {
+    ESP_LOGI("MAIN","SW version:%s",__TIMESTAMP__);
+    gpio_reset_pin(BLINK_GPIO);
+    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);    
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *configured = esp_ota_get_boot_partition();
+    const esp_partition_t *update_partition = NULL;
+    ESP_LOGI("MAIN", "Running partition type %d subtype %d (offset 0x%08x) configured(0x%08x)",
+             running->type, running->subtype, running->address,configured->address);
+    update_partition = esp_ota_get_next_update_partition(NULL);
+    assert(update_partition != NULL);
+    ESP_LOGI("MAIN", "Writing to partition subtype %d at offset 0x%x",
+             update_partition->subtype, update_partition->address);
+    esp_err_t err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE("MAIN", "esp_ota_set_boot_partition failed (%s)!", esp_err_to_name(err));
+    }
+    ESP_LOGI("MAIN", "Prepare to restart system!");
+    // esp_restart();
+
+    
     init();
+    xTaskCreate(blink_task, "blink_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(rx_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
 }
