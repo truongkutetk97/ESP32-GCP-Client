@@ -19,7 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
-#include "esp_event.h"
+#include "esp_event.h"z
 #include "esp_ota_ops.h"
 #include "esp_http_client.h"
 #include "esp_flash_partitions.h"
@@ -38,7 +38,7 @@
 
 static const int RX_BUF_SIZE = 1024;
 static uint8_t s_led_state = 0;
-static uint8_t s_led_freq = 2;
+static uint8_t s_led_freq = 10; //Hz
 static const char *TAG = "WIFI-AP";
 
 
@@ -299,6 +299,7 @@ void app_main(void)
     const esp_partition_t *update_partition = NULL;
     ESP_LOGI("MAIN", "Running partition type %d subtype %d (offset 0x%08x) configured(0x%08x)",
              running->type, running->subtype, running->address,configured->address);
+    //This return next ota partition only 0x110000 0x210000, not factory
     update_partition = esp_ota_get_next_update_partition(NULL);
     assert(update_partition != NULL);
     ESP_LOGI("MAIN", "Writing to partition subtype %d at offset 0x%x",
@@ -329,3 +330,32 @@ void app_main(void)
     xTaskCreate(rx_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
 }
+
+
+/*
+design:
+
+OTA whenever available update: check version and download binary
+switch partition when done 
+save configuration to flash
+return the MAC address to server 
+
+fast blink when no connected
+normal blink when mesh connected
+slow blink when mesh + cloud connected
+
+server - user phone
+server - monitoring system
+server - cluster controller - leaf node 
+
+cluster controller: 
+when no connected to cloud: fast blink + open a AP to configure wifi
+when connected to cloud: normal blink + connect to cloud with tcp/mqtt/ftp
+receive binary wheneveer new image
+keep alive 3s
+no keep alive -> reset -> mark DTC connection error -> retry till success, ping to google as well, open AP for 2 mins and retry for 2 mins
+onStart(): check configuration, check cloud connection, check OTA version, check provisioning data, 
+onRunning(): send keep alive, wait for cloud message, send temperature to cloud.
+
+
+*/
