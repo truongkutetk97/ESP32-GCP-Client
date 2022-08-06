@@ -34,6 +34,8 @@
 #include <sys/param.h>
 #include "esp_netif.h"
 #include <esp_http_server.h>
+#include <esp_mac.h>
+
 
 
 static const int RX_BUF_SIZE = 1024;
@@ -42,8 +44,19 @@ static uint8_t s_led_freq = 10; //Hz
 static const char *WIFITAG = "-----[WIFI-AP]";
 static const char *MAINTAG = "-----[MAIN]";
 #define SW_VERSION_NUMBER "v0.1.7"
+#define SW_VERSION_LENGTH 22
+#define NVS_DEFAULT_NAMESPACE "default_nspc"
+#define NVS_DEFAULT_KEY "nvs_key"
+#define NVS_PTT_DAS "nvs_das"
+#define NVS_PTT_OA1 "nvs_oa1"
+#define NVS_PTT_OA2 "nvs_oa2"
+#define NVS_PTT_DTC "nvs_dtc"
+#define MAC_ADDRESS_LENGTH 8
+#define DTC_UNSET 0
+#define DTC_SET   1
 
-static char SW_VERSION_FULL[22]={0,}; //v1.01.01-yymmdd.hhmmss
+
+static char SW_VERSION_FULL[SW_VERSION_LENGTH]={0,}; //v1.01.01-yymmdd.hhmmss
 
 #define TXD_PIN (GPIO_NUM_4)
 #define RXD_PIN (GPIO_NUM_5)
@@ -54,8 +67,8 @@ static char SW_VERSION_FULL[22]={0,}; //v1.01.01-yymmdd.hhmmss
 #define EXAMPLE_MAX_STA_CONN       3
 
 typedef struct{
-    unsigned char version1[10]; //v1.0.0
-    unsigned char version2[10]; //v1.0.0
+    unsigned char swVer[SW_VERSION_LENGTH]; //v1.01.01-yymmdd.hhmmss
+    unsigned char macAddress[MAC_ADDRESS_LENGTH]; //v1.01.01-yymmdd.hhmmss
     uint8_t config_type; //DAS-OTA1-OTA2
     uint8_t product_type; //light-connector-camera
     uint8_t initialConfigMethod; //wifi AP/ bluetooth/ esp provision
@@ -71,6 +84,25 @@ typedef struct{
     uint8_t wifiMeshMaxLayer; //3~10 layer
 }config_param_t;
 
+config_param_t GLOBAL_DAS = {
+    "NA", // version1
+    "NA",  // version2
+    0,  // config_type
+    1,  // product_type
+    2,  // initialConfigMethod
+    1,  // normalBlinkFreq
+    5,  // fastBlinkFreq
+    30,  // otaSchedule
+    {0,},  // gcpIP
+    8891,  // gcpTcpPort
+    8884,  // gcpMqttPort
+    8882,  // gcpFtpPort
+    5,  // mqttKeepAlive
+    3,  // tcpKeepAlive
+    4  // wifiMeshMaxLayer
+};
+
+
 typedef struct{
     uint8_t INITIAL_FIRMWARE; //= 1; to check whether using default fw or ota firmware
     uint8_t PROVISION_FAILURE ;//= 1;
@@ -81,6 +113,18 @@ typedef struct{
     uint8_t USER_CONNECTION_FAILURE ;//= 1;
     uint8_t SENSOR_HARDWARE_FAILURE ;//= 1;
 }dtc_error_t;
+
+dtc_error_t GLOBAL_DTC = {
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+};
+
 
 // const char version_yymmdd[6] =
 // {
@@ -306,6 +350,96 @@ void wifi_init_softap(void)
              EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS, EXAMPLE_ESP_WIFI_CHANNEL);
 }
 
+esp_err_t nvsReadSize(const char *part_name, const char* key, size_t* length ){
+    nvs_handle_t my_handle;
+    esp_err_t err;
+    char err_msg[20];
+
+    nvs_stats_t nvs_stats;
+    nvs_get_stats(part_name, &nvs_stats);
+
+    if(nvs_stats.used_entries <= 0){
+        ESP_LOGI(MAINTAG,"[%s] partition %s is empty",__FUNCTION__,part_name);
+        err = ESP_ERR_NOT_FOUND;
+        return err;
+    }
+    ESP_LOGI(MAINTAG,"[%s] partition %s has %d/%d",__FUNCTION__,part_name, nvs_stats.used_entries,nvs_stats.total_entries);
+
+    err = nvs_open_from_partition(part_name, NVS_DEFAULT_NAMESPACE, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK){
+        ESP_LOGI(MAINTAG,"[%s] nvs_open_from_partition failed:%s",__FUNCTION__, esp_err_to_name_r(err, err_msg, sizeof(err_msg)));
+        err = ESP_ERR_INVALID_STATE;
+        return err;
+    }
+
+    size_t required_size = 0;  // value will default to 0, if not set yet in NVS
+    err = nvs_get_blob(my_handle, key, NULL, &required_size);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND ) return err;
+    ESP_LOGI(MAINTAG,"[%s] partition %s is required %d",__FUNCTION__,part_name,required_size);
+
+    *length = required_size;
+    err= ESP_OK;
+    nvs_close(my_handle);
+
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+    return err;
+}
+
+esp_err_t nvsReadBlob(const char *part_name, const char* key, void* out_value, size_t* length ){
+    nvs_handle_t my_handle;
+    esp_err_t err;
+    char err_msg[20];
+
+    err = nvs_open_from_partition(part_name, NVS_DEFAULT_NAMESPACE, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK){
+        ESP_LOGI(MAINTAG,"[%s] nvs_open_from_partition failed:%s",__FUNCTION__, esp_err_to_name_r(err, err_msg, sizeof(err_msg)));
+        err = ESP_ERR_INVALID_STATE;
+        return err;
+    }
+
+
+    err = nvs_get_blob(my_handle, key, out_value, length);
+    if (err != ESP_OK) {
+        ESP_LOGI(MAINTAG,"[%s] nvs_get_blob %s error:%d",__FUNCTION__, key, err);
+        return err;
+    }
+
+    nvs_close(my_handle);
+    err = ESP_OK;
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+    return err;
+
+}
+
+esp_err_t nvsWriteBlob(const char *part_name, const char* key, void* in_value, size_t length){
+    nvs_handle_t my_handle;
+    esp_err_t err;
+    char err_msg[20];
+
+    err = nvs_open_from_partition(part_name, NVS_DEFAULT_NAMESPACE, NVS_READWRITE, &my_handle);
+    if (err != ESP_OK){
+        ESP_LOGI(MAINTAG,"[%s] nvs_open_from_partition failed:%s",__FUNCTION__, esp_err_to_name_r(err, err_msg, sizeof(err_msg)));
+        err = ESP_ERR_INVALID_STATE;
+        return err;
+    }
+
+    err = nvs_set_blob(my_handle, key, in_value, length);
+    if (err != ESP_OK){
+        ESP_LOGI(MAINTAG,"[%s] nvs_set_blob failed:%s",__FUNCTION__, esp_err_to_name_r(err, err_msg, sizeof(err_msg)));
+        return err;
+    } 
+
+    err = nvs_commit(my_handle);
+    if (err != ESP_OK){
+        ESP_LOGI(MAINTAG,"[%s] nvs_commit failed:%s",__FUNCTION__, esp_err_to_name_r(err, err_msg, sizeof(err_msg)));
+        return err;
+    } 
+
+    nvs_close(my_handle);
+    err = ESP_OK;
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+    return err;
+}
 
 void initVersion(void){
     char version_yymmdd[6] ={
@@ -348,6 +482,7 @@ void initVersion(void){
     pos += 1;
     memcpy(&SW_VERSION_FULL[pos],&version_hhmmss[0],sizeof(version_hhmmss));
 
+    ESP_LOGI(MAINTAG,"[%s] ################################################################################################################",__FUNCTION__);
     ESP_LOGI(MAINTAG,"[%s] SW_VERSION_FULL=%s=",__FUNCTION__,SW_VERSION_FULL);
     ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
 }
@@ -374,6 +509,110 @@ void initLed(void) {
     ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
 }
 
+void initNvs(void) {
+    //Default nvs
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+
+    ESP_ERROR_CHECK(nvs_flash_init_partition("nvs_das"));
+    ESP_ERROR_CHECK(nvs_flash_init_partition("nvs_oa1"));
+    ESP_ERROR_CHECK(nvs_flash_init_partition("nvs_oa2"));
+    ESP_ERROR_CHECK(nvs_flash_init_partition("nvs_dtc"));
+
+
+    nvs_stats_t nvs_stats;
+    nvs_get_stats(NULL, &nvs_stats);
+    ESP_LOGI(MAINTAG,"[%s] default_nvs Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)",
+          __FUNCTION__, nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
+    
+    nvs_get_stats("nvs_das", &nvs_stats);
+    ESP_LOGI(MAINTAG,"[%s] nvs_das Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)",
+          __FUNCTION__, nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
+
+    nvs_get_stats("nvs_oa1", &nvs_stats);
+    ESP_LOGI(MAINTAG,"[%s] nvs_oa1 Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)",
+          __FUNCTION__, nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
+
+    nvs_get_stats("nvs_oa2", &nvs_stats);
+    ESP_LOGI(MAINTAG,"[%s] nvs_oa2 Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)",
+          __FUNCTION__, nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
+
+    nvs_get_stats("nvs_dtc", &nvs_stats);
+    ESP_LOGI(MAINTAG,"[%s] nvs_dtc Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)",
+          __FUNCTION__, nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
+                              
+    // nvs_das
+    // nvs_oa1
+    // nvs_oa2
+    // nvs_dtc
+    // nvs_usr
+    // nvs_ext
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+}
+
+void initConfiguration(void){
+    //factory image will write the dtc and das
+    //ota image will check dtc and check das availability
+    //ota image will update swver to ota1 or ota2
+
+    esp_err_t errStat;
+    config_param_t curDas = {0,};
+    dtc_error_t curDtc = {0,};
+    size_t length;
+    
+    //If no available das, write the default das to global variable
+    length=sizeof(curDas);
+    errStat = nvsReadBlob(NVS_PTT_DAS,NVS_DEFAULT_KEY, &curDas,&length);
+    if(errStat!=ESP_OK) { 
+        errStat = nvsWriteBlob(NVS_PTT_DAS,NVS_DEFAULT_KEY, &GLOBAL_DAS, sizeof(GLOBAL_DAS));
+    }
+
+    //If no available dtc, write the default dtc to global variable
+    length = sizeof(curDtc);
+    errStat = nvsReadBlob(NVS_PTT_DTC,NVS_DEFAULT_KEY, &curDtc,&length);
+    if(errStat!=ESP_OK) { 
+        errStat = nvsWriteBlob(NVS_PTT_DTC,NVS_DEFAULT_KEY, &GLOBAL_DTC, sizeof(GLOBAL_DTC));
+    }
+
+    // size_t targetRead = 0;
+    // errStat = nvsReadSize("nvs_das","das_key",&targetRead);
+    // if(errStat!=ESP_OK)return;
+
+    curDas = {0,};
+    length = sizeof(curDas);
+    errStat = nvsReadBlob(NVS_PTT_DAS,NVS_DEFAULT_KEY, &curDas,&length);
+    if(errStat!=ESP_OK) { ESP_LOGI(MAINTAG,"[%s] nvsReadBlob failed:%d",__FUNCTION__,errStat); return;}
+    GLOBAL_DAS = curDas;
+
+    curDtc = {0,};
+    length = sizeof(curDtc);
+    errStat = nvsReadBlob(NVS_PTT_DTC,NVS_DEFAULT_KEY, &curDtc,&length);
+    if(errStat!=ESP_OK) { ESP_LOGI(MAINTAG,"[%s] nvsReadBlob failed:%d",__FUNCTION__,errStat); return;}
+    GLOBAL_DTC = curDtc;
+
+    //Write current swversion to nvs
+    memcpy(&GLOBAL_DAS.swVer[0], &SW_VERSION_FULL[0], sizeof(SW_VERSION_FULL));
+    ESP_LOGI(MAINTAG,"[%s] GLOBAL_DAS::SW_VERSION_FULL=%s",__FUNCTION__, GLOBAL_DAS.swVer);
+
+    errStat = esp_read_mac(&GLOBAL_DAS.macAddress[0], ESP_MAC_WIFI_STA);
+    ESP_LOGI(MAINTAG,"[%s] GLOBAL_DAS::macAddress="MACSTR,__FUNCTION__, MAC2STR(GLOBAL_DAS.macAddress));
+
+    errStat = nvsWriteBlob(NVS_PTT_DAS,NVS_DEFAULT_KEY, &GLOBAL_DAS, sizeof(GLOBAL_DAS));
+
+    GLOBAL_DTC.INITIAL_FIRMWARE = DTC_UNSET;
+    GLOBAL_DTC.OTA_FAILURE = DTC_UNSET;
+    GLOBAL_DTC.PROVISION_FAILURE = DTC_UNSET;
+    errStat = nvsWriteBlob(NVS_PTT_DTC,NVS_DEFAULT_KEY, &GLOBAL_DTC, sizeof(GLOBAL_DTC));
+
+    // ESP_LOGI(MAINTAG,"[%s] erasing ",__FUNCTION__);
+    // nvs_flash_erase_partition(NVS_PTT_DAS);
+    // nvs_flash_erase_partition(NVS_PTT_DTC);
+
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+}
 void initPartitionInfo(void) {
 
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -443,29 +682,22 @@ static void blink_task(void *arg)
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(MAINTAG,"################################################################################################################");
     initVersion();
-    // ESP_LOGI(MAINTAG,"SW version:v1.0.1-build:%s-%s",version_hhmmss,version_yymmdd);
     initUart();
     initLed();
+
+    initNvs();
+    initConfiguration();
     initPartitionInfo();
 
-	static httpd_handle_t server = NULL;
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-      ESP_ERROR_CHECK(nvs_flash_erase());
-      ret = nvs_flash_init();
-    }
+    ESP_LOGI(MAINTAG,"[%s] System has BOOT_COMPLETED",__FUNCTION__);
 
-    nvs_stats_t nvs_stats;
-    nvs_get_stats(NULL, &nvs_stats);
-    ESP_LOGI(MAINTAG,"Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)\n",
-          nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
 
-    ESP_ERROR_CHECK(ret);
     ESP_LOGI(WIFITAG, "ESP_WIFI_MODE_AP");
     wifi_init_softap();
     ESP_ERROR_CHECK(esp_netif_init());
+    static httpd_handle_t server = NULL;
+
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &connect_handler, &server));
 
 
@@ -500,6 +732,11 @@ keep alive 3s
 no keep alive -> reset -> mark DTC connection error -> retry till success, ping to google as well, open AP for 2 mins and retry for 2 mins
 onStart(): check DTC, check configuration, check OTA version, check cloud connection,
 onRunning(): send keep alive, wait for cloud message, send temperature to cloud.
+
+//todo
+implement cloud connection
+implement event loop
+
 
 partition:
 
