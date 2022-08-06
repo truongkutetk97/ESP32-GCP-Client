@@ -19,7 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
-#include "esp_event.h"z
+#include "esp_event.h"
 #include "esp_ota_ops.h"
 #include "esp_http_client.h"
 #include "esp_flash_partitions.h"
@@ -39,19 +39,23 @@
 static const int RX_BUF_SIZE = 1024;
 static uint8_t s_led_state = 0;
 static uint8_t s_led_freq = 10; //Hz
-static const char *TAG = "WIFI-AP";
+static const char *WIFITAG = "-----[WIFI-AP]";
+static const char *MAINTAG = "-----[MAIN]";
+#define SW_VERSION_NUMBER "v0.1.7"
 
+static char SW_VERSION_FULL[22]={0,}; //v1.01.01-yymmdd.hhmmss
 
 #define TXD_PIN (GPIO_NUM_4)
 #define RXD_PIN (GPIO_NUM_5)
-#define BLINK_GPIO 2
+#define BLINK_GPIO (gpio_num_t)2
 #define EXAMPLE_ESP_WIFI_SSID      "samantha_001"
 #define EXAMPLE_ESP_WIFI_PASS      "11111112"
 #define EXAMPLE_ESP_WIFI_CHANNEL   1
 #define EXAMPLE_MAX_STA_CONN       3
 
 typedef struct{
-    unsigned char version[10]; //v1.0.0
+    unsigned char version1[10]; //v1.0.0
+    unsigned char version2[10]; //v1.0.0
     uint8_t config_type; //DAS-OTA1-OTA2
     uint8_t product_type; //light-connector-camera
     uint8_t initialConfigMethod; //wifi AP/ bluetooth/ esp provision
@@ -68,29 +72,74 @@ typedef struct{
 }config_param_t;
 
 typedef struct{
-    uint8_t INITIAL_FIRMWARE = 1; //to check whether using default fw or ota firmware
-    uint8_t CONFIGURATION_NOT_PROVISION = 1;
-    uint8_t CLOUD_CONNECTION_FAILURE = 1;
-    uint8_t NO_MESH_CONNECTED = 1;
-    uint8_t MESH_NODE_FAILURE = 1;
-    uint8_t USER_CONNECTION_FAILURE = 1;
-    uint8_t SENSOR_HARDWARE_FAILURE = 1;
-    uint8_t OTA_FAILURE = 1;
-    uint8_t PROVISION_FAILURE = 1;
+    uint8_t INITIAL_FIRMWARE; //= 1; to check whether using default fw or ota firmware
+    uint8_t PROVISION_FAILURE ;//= 1;
+    uint8_t OTA_FAILURE ;//= 1;
+    uint8_t CLOUD_CONNECTION_FAILURE ;//= 1;
+    uint8_t NO_MESH_CONNECTED ;//= 1;
+    uint8_t MESH_NODE_FAILURE ;//= 1;
+    uint8_t USER_CONNECTION_FAILURE ;//= 1;
+    uint8_t SENSOR_HARDWARE_FAILURE ;//= 1;
 }dtc_error_t;
+
+// const char version_yymmdd[6] =
+// {
+//    // YY year
+//    __DATE__[9], __DATE__[10],
+
+//    // First month letter, Oct Nov Dec = '1' otherwise '0'
+//    (__DATE__[0] == 'O' || __DATE__[0] == 'N' || __DATE__[0] == 'D') ? '1' : '0',
+   
+//    // Second month letter
+//    (__DATE__[0] == 'J') ? ( (__DATE__[1] == 'a') ? '1' :       // Jan, Jun or Jul
+//                             ((__DATE__[2] == 'n') ? '6' : '7') ) :
+//    (__DATE__[0] == 'F') ? '2' :                                // Feb 
+//    (__DATE__[0] == 'M') ? (__DATE__[2] == 'r') ? '3' : '5' :   // Mar or May
+//    (__DATE__[0] == 'A') ? (__DATE__[1] == 'p') ? '4' : '8' :   // Apr or Aug
+//    (__DATE__[0] == 'S') ? '9' :                                // Sep
+//    (__DATE__[0] == 'O') ? '0' :                                // Oct
+//    (__DATE__[0] == 'N') ? '1' :                                // Nov
+//    (__DATE__[0] == 'D') ? '2' :                                // Dec
+//    0,
+
+//    // First day letter, replace space with digit
+//    __DATE__[4]==' ' ? '0' : __DATE__[4],
+
+//    // Second day letter
+//    __DATE__[5]
+// };
+// //20:50:45
+// const char version_hhmmss[6+1] =
+// {
+//    // YY year
+//    __TIME__[0], __TIME__[1],
+//    __TIME__[3], __TIME__[4],
+//    __TIME__[6], __TIME__[7],
+//   '\0'
+// };
+
+//v1.0.1
+// const char version_sw[6+1]=
+// {
+//     'v',
+//     '1','.',
+//     '0','.',
+//     '1','\0'
+// };
+
 
 static esp_err_t ledOFF_handler(httpd_req_t *req)
 {
 	esp_err_t error;
-	ESP_LOGI(TAG, "LED Turned OFF");
+	ESP_LOGI(WIFITAG, "LED Turned OFF");
 	// gpio_set_level(LED, 0);
 	const char *response = (const char *) req->user_ctx;
 	error = httpd_resp_send(req, response, strlen(response));
 	if (error != ESP_OK)
 	{
-		ESP_LOGI(TAG, "Error %d while sending Response", error);
+		ESP_LOGI(WIFITAG, "Error %d while sending Response", error);
 	}
-	else ESP_LOGI(TAG, "Response sent Successfully");
+	else ESP_LOGI(WIFITAG, "Response sent Successfully");
 	return error;
 }
 
@@ -98,15 +147,15 @@ static esp_err_t ledOFF_handler(httpd_req_t *req)
 static esp_err_t ledON_handler(httpd_req_t *req)
 {
 	esp_err_t error;
-	ESP_LOGI(TAG, "LED Turned ON");
+	ESP_LOGI(WIFITAG, "LED Turned ON");
 	// gpio_set_level(LED, 1);
 	const char *response = (const char *) req->user_ctx;
 	error = httpd_resp_send(req, response, strlen(response));
 	if (error != ESP_OK)
 	{
-		ESP_LOGI(TAG, "Error %d while sending Response", error);
+		ESP_LOGI(WIFITAG, "Error %d while sending Response", error);
 	}
-	else ESP_LOGI(TAG, "Response sent Successfully");
+	else ESP_LOGI(WIFITAG, "Response sent Successfully");
 	return error;
 }
 
@@ -118,7 +167,7 @@ static const httpd_uri_t root = {
     .handler   = ledOFF_handler,
     /* Let's pass response string in user
      * context to demonstrate it's usage */
-    .user_ctx  = "<!DOCTYPE html><html>\
+    .user_ctx  = (void *) "<!DOCTYPE html><html>\
 \
 <head>\
 <style>\
@@ -165,17 +214,17 @@ static httpd_handle_t start_webserver(void)
     config.lru_purge_enable = true;
 
     // Start the httpd server
-    ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
+    ESP_LOGI(WIFITAG, "Starting server on port: '%d'", config.server_port);
     if (httpd_start(&server, &config) == ESP_OK) {
         // Set URI handlers
-        ESP_LOGI(TAG, "Registering URI handlers");
+        ESP_LOGI(WIFITAG, "Registering URI handlers");
         // httpd_register_uri_handler(server, &ledoff);
         // httpd_register_uri_handler(server, &ledon);
         httpd_register_uri_handler(server, &root);
         return server;
     }
 
-    ESP_LOGI(TAG, "Error starting server!");
+    ESP_LOGI(WIFITAG, "Error starting server!");
     return NULL;
 }
 
@@ -190,7 +239,7 @@ static void disconnect_handler(void* arg, esp_event_base_t event_base,
 {
     httpd_handle_t* server = (httpd_handle_t*) arg;
     if (*server) {
-        ESP_LOGI(TAG, "Stopping webserver");
+        ESP_LOGI(WIFITAG, "Stopping webserver");
         stop_webserver(*server);
         *server = NULL;
     }
@@ -201,7 +250,7 @@ static void connect_handler(void* arg, esp_event_base_t event_base,
 {
     httpd_handle_t* server = (httpd_handle_t*) arg;
     if (*server == NULL) {
-        ESP_LOGI(TAG, "Starting webserver");
+        ESP_LOGI(WIFITAG, "Starting webserver");
         *server = start_webserver();
     }
 }
@@ -211,11 +260,11 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 {
     if (event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
-        ESP_LOGI(TAG, "station "" join, AID=%d",
+        ESP_LOGI(WIFITAG, "station "" join, AID=%d",
                   event->aid);
     } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
-        ESP_LOGI(TAG, "station "" leave, AID=%d",
+        ESP_LOGI(WIFITAG, "station "" leave, AID=%d",
                  event->aid);
     }
 }
@@ -238,11 +287,11 @@ void wifi_init_softap(void)
     wifi_config_t wifi_config = {
         .ap = {
             .ssid = EXAMPLE_ESP_WIFI_SSID,
-            .ssid_len = strlen(EXAMPLE_ESP_WIFI_SSID),
             // .channel = EXAMPLE_ESP_WIFI_CHANNEL,
             .password = EXAMPLE_ESP_WIFI_PASS,
-            .max_connection = EXAMPLE_MAX_STA_CONN,
-            .authmode = WIFI_AUTH_WPA_WPA2_PSK
+            .ssid_len = strlen(EXAMPLE_ESP_WIFI_SSID),
+            .authmode = WIFI_AUTH_WPA_WPA2_PSK,
+            .max_connection = EXAMPLE_MAX_STA_CONN
         },
     };
     if (strlen(EXAMPLE_ESP_WIFI_PASS) == 0) {
@@ -253,12 +302,57 @@ void wifi_init_softap(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "wifi_init_softap finished. SSID:%s password:%s channel:%d",
+    ESP_LOGI(WIFITAG, "wifi_init_softap finished. SSID:%s password:%s channel:%d",
              EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS, EXAMPLE_ESP_WIFI_CHANNEL);
 }
 
 
-void init(void) {
+void initVersion(void){
+    char version_yymmdd[6] ={
+    __DATE__[9], __DATE__[10],
+    (__DATE__[0] == 'O' || __DATE__[0] == 'N' || __DATE__[0] == 'D') ? '1' : '0', //Oct Nov Dec = '1'
+    (__DATE__[0] == 'J') ? ( (__DATE__[1] == 'a') ? '1' :       // Jan, Jun or Jul
+                                ((__DATE__[2] == 'n') ? '6' : '7') ) :
+    (__DATE__[0] == 'F') ? '2' :                                // Feb 
+    (__DATE__[0] == 'M') ? (__DATE__[2] == 'r') ? '3' : '5' :   // Mar or May
+    (__DATE__[0] == 'A') ? (__DATE__[1] == 'p') ? '4' : '8' :   // Apr or Aug
+    (__DATE__[0] == 'S') ? '9' :                                // Sep
+    (__DATE__[0] == 'O') ? '0' :                                // Oct
+    (__DATE__[0] == 'N') ? '1' :                                // Nov
+    (__DATE__[0] == 'D') ? '2' :                                // Dec
+    0,
+    __DATE__[4]==' ' ? '0' : __DATE__[4],
+    __DATE__[5]
+    };
+    char version_hhmmss[6] ={
+    __TIME__[0], __TIME__[1],
+    __TIME__[3], __TIME__[4],
+    __TIME__[6], __TIME__[7]};
+    char version_sw[6]=
+    {
+        'v',
+        '1','.',
+        '0','.',
+        '1'
+    };
+    uint8_t pos = 0;
+    memset(&SW_VERSION_FULL[0],0,sizeof(SW_VERSION_FULL));
+    // memcpy(&SW_VERSION_FULL[0],&version_sw[0],sizeof(version_sw));
+    memcpy(&SW_VERSION_FULL[pos],&SW_VERSION_NUMBER[0],sizeof(SW_VERSION_NUMBER));
+    pos += sizeof(SW_VERSION_NUMBER); pos -= 1;
+    SW_VERSION_FULL[pos]='-';
+    pos += 1; 
+    memcpy(&SW_VERSION_FULL[pos],&version_yymmdd[0],sizeof(version_yymmdd));
+    pos += sizeof(version_yymmdd); 
+    SW_VERSION_FULL[pos]='.';
+    pos += 1;
+    memcpy(&SW_VERSION_FULL[pos],&version_hhmmss[0],sizeof(version_hhmmss));
+
+    ESP_LOGI(MAINTAG,"[%s] SW_VERSION_FULL=%s=",__FUNCTION__,SW_VERSION_FULL);
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+}
+
+void initUart(void) {
     const uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -271,8 +365,38 @@ void init(void) {
     uart_driver_install(UART_NUM_1, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
     uart_param_config(UART_NUM_1, &uart_config);
     uart_set_pin(UART_NUM_1, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
 }
 
+void initLed(void) {
+    gpio_reset_pin((gpio_num_t)BLINK_GPIO);
+    gpio_set_direction((gpio_num_t)BLINK_GPIO, GPIO_MODE_OUTPUT);    
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+}
+
+void initPartitionInfo(void) {
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *configured = esp_ota_get_boot_partition();
+    const esp_partition_t *update_partition = NULL;
+    ESP_LOGI(MAINTAG, "Running(0x%08x) configured(0x%08x)", running->address,configured->address);
+    //This return next ota partition only 0x110000 0x210000, not factory
+    update_partition = esp_ota_get_next_update_partition(NULL);
+    assert(update_partition != NULL);
+    ESP_LOGI(MAINTAG, "update_partition(0x%08x) configured(0x%08x)", update_partition->address,configured->address);
+
+    ESP_LOGI(MAINTAG, "Writing to partition subtype %d at offset 0x%x",
+             update_partition->subtype, update_partition->address);
+    esp_err_t err = esp_ota_set_boot_partition(update_partition);
+    configured = esp_ota_get_boot_partition();
+    if (err != ESP_OK) {
+        ESP_LOGE("MAIN", "esp_ota_set_boot_partition failed (%s)!", esp_err_to_name(err));
+    }
+    ESP_LOGI(MAINTAG, "Prepare to restart system! (0x%08x) ",configured->address);
+    
+    // esp_restart();
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+}
 int sendData(const char* logName, const char* data)
 {
     const int len = strlen(data);
@@ -317,28 +441,14 @@ static void blink_task(void *arg)
     }
 }
 
-void app_main(void)
+extern "C" void app_main(void)
 {
-    ESP_LOGI("MAIN","SW version:%s",__TIMESTAMP__);
-    gpio_reset_pin(BLINK_GPIO);
-    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);    
-
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    const esp_partition_t *configured = esp_ota_get_boot_partition();
-    const esp_partition_t *update_partition = NULL;
-    ESP_LOGI("MAIN", "Running partition type %d subtype %d (offset 0x%08x) configured(0x%08x)",
-             running->type, running->subtype, running->address,configured->address);
-    //This return next ota partition only 0x110000 0x210000, not factory
-    update_partition = esp_ota_get_next_update_partition(NULL);
-    assert(update_partition != NULL);
-    ESP_LOGI("MAIN", "Writing to partition subtype %d at offset 0x%x",
-             update_partition->subtype, update_partition->address);
-    esp_err_t err = esp_ota_set_boot_partition(update_partition);
-    if (err != ESP_OK) {
-        ESP_LOGE("MAIN", "esp_ota_set_boot_partition failed (%s)!", esp_err_to_name(err));
-    }
-    ESP_LOGI("MAIN", "Prepare to restart system!");
-    // esp_restart();
+    ESP_LOGI(MAINTAG,"################################################################################################################");
+    initVersion();
+    // ESP_LOGI(MAINTAG,"SW version:v1.0.1-build:%s-%s",version_hhmmss,version_yymmdd);
+    initUart();
+    initLed();
+    initPartitionInfo();
 
 	static httpd_handle_t server = NULL;
     esp_err_t ret = nvs_flash_init();
@@ -349,18 +459,17 @@ void app_main(void)
 
     nvs_stats_t nvs_stats;
     nvs_get_stats(NULL, &nvs_stats);
-    ESP_LOGI("MAIN","Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)\n",
+    ESP_LOGI(MAINTAG,"Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)\n",
           nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
 
     ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "ESP_WIFI_MODE_AP");
+    ESP_LOGI(WIFITAG, "ESP_WIFI_MODE_AP");
     wifi_init_softap();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &connect_handler, &server));
 
 
     
-    init();
     xTaskCreate(blink_task, "blink_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(rx_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
@@ -389,7 +498,7 @@ when connected to cloud: normal blink + connect to cloud with tcp/mqtt/ftp
 receive binary wheneveer new image
 keep alive 3s
 no keep alive -> reset -> mark DTC connection error -> retry till success, ping to google as well, open AP for 2 mins and retry for 2 mins
-onStart(): check configuration, check cloud connection, check OTA version, check provisioning data, 
+onStart(): check DTC, check configuration, check OTA version, check cloud connection,
 onRunning(): send keep alive, wait for cloud message, send temperature to cloud.
 
 partition:
@@ -411,7 +520,6 @@ end at 0x330000
 # Name,   Type, SubType, Offset,  Size, Flags
 nvs,      data, nvs,     0x9000,  0x4000,
 otadata,  data, ota,     0xd000,  0x2000,
-phy_init, data, phy,     0xf000,  0x1000,
 factory,  app,  factory, 0x10000,  0xF0000,
 ota_0,    app,  ota_0,   0x100000, 0xF0000,
 ota_1,    app,  ota_1,   0x1F0000, 0xF0000,
@@ -420,5 +528,6 @@ nvs_oa1,    data,  nvs,   0x2F0000, 0x10000,
 nvs_oa2,    data,  nvs,   0x300000, 0x10000,
 nvs_dtc,    data,  nvs,   0x310000, 0x10000,
 nvs_usr,    data,  nvs,   0x320000, 0x10000,
+nvs_ext,    data,  nvs,   0x330000, 0x50000,
 
 */
