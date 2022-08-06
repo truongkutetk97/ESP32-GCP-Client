@@ -50,6 +50,35 @@ static const char *TAG = "WIFI-AP";
 #define EXAMPLE_ESP_WIFI_CHANNEL   1
 #define EXAMPLE_MAX_STA_CONN       3
 
+typedef struct{
+    unsigned char version[10]; //v1.0.0
+    uint8_t config_type; //DAS-OTA1-OTA2
+    uint8_t product_type; //light-connector-camera
+    uint8_t initialConfigMethod; //wifi AP/ bluetooth/ esp provision
+    uint8_t normalBlinkFreq; // Hz
+    uint8_t fastBlinkFreq; // Hz
+    uint16_t otaSchedule; // days
+    unsigned char gcpIP[15]; //0.0.0.0
+    uint16_t gcpTcpPort;
+    uint16_t gcpMqttPort;
+    uint16_t gcpFtpPort;
+    uint8_t mqttKeepAlive; // second
+    uint8_t tcpKeepAlive; // second
+    uint8_t wifiMeshMaxLayer; //3~10 layer
+}config_param_t;
+
+typedef struct{
+    uint8_t INITIAL_FIRMWARE = 1; //to check whether using default fw or ota firmware
+    uint8_t CONFIGURATION_NOT_PROVISION = 1;
+    uint8_t CLOUD_CONNECTION_FAILURE = 1;
+    uint8_t NO_MESH_CONNECTED = 1;
+    uint8_t MESH_NODE_FAILURE = 1;
+    uint8_t USER_CONNECTION_FAILURE = 1;
+    uint8_t SENSOR_HARDWARE_FAILURE = 1;
+    uint8_t OTA_FAILURE = 1;
+    uint8_t PROVISION_FAILURE = 1;
+}dtc_error_t;
+
 static esp_err_t ledOFF_handler(httpd_req_t *req)
 {
 	esp_err_t error;
@@ -317,6 +346,12 @@ void app_main(void)
       ESP_ERROR_CHECK(nvs_flash_erase());
       ret = nvs_flash_init();
     }
+
+    nvs_stats_t nvs_stats;
+    nvs_get_stats(NULL, &nvs_stats);
+    ESP_LOGI("MAIN","Count: UsedEntries = (%d), FreeEntries = (%d), AllEntries = (%d)\n",
+          nvs_stats.used_entries, nvs_stats.free_entries, nvs_stats.total_entries);
+
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "ESP_WIFI_MODE_AP");
     wifi_init_softap();
@@ -357,5 +392,33 @@ no keep alive -> reset -> mark DTC connection error -> retry till success, ping 
 onStart(): check configuration, check cloud connection, check OTA version, check provisioning data, 
 onRunning(): send keep alive, wait for cloud message, send temperature to cloud.
 
+partition:
+
+bootloader.bin 0x1000
+partition-table.bin 0x8000
+nvs_default 0x9000 0x4000
+ota_data_initial.bin 0xd000 0x2000
+factory.bin 0x10000 size:0xF0000
+ota1.bin 0x100000 size:0xF0000
+ota2.bin 0x1F0000 size:0xF0000
+nvs das 0x2E0000 size 0x10000
+nvs ota1 0x2F0000 size 0x10000
+nvs ota2 0x300000 size 0x10000
+nvs dtc 0x310000 size 0x10000
+nvs user 0x320000  size 0x10000
+end at 0x330000
+
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  0x4000,
+otadata,  data, ota,     0xd000,  0x2000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000,  0xF0000,
+ota_0,    app,  ota_0,   0x100000, 0xF0000,
+ota_1,    app,  ota_1,   0x1F0000, 0xF0000,
+nvs_das,    data,  nvs,   0x2E0000, 0x10000,
+nvs_oa1,    data,  nvs,   0x2F0000, 0x10000,
+nvs_oa2,    data,  nvs,   0x300000, 0x10000,
+nvs_dtc,    data,  nvs,   0x310000, 0x10000,
+nvs_usr,    data,  nvs,   0x320000, 0x10000,
 
 */
