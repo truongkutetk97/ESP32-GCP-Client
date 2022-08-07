@@ -35,14 +35,23 @@
 #include "esp_netif.h"
 #include <esp_http_server.h>
 #include <esp_mac.h>
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
 
+#include "lwip/sockets.h"
+#include "lwip/dns.h"
+#include "lwip/netdb.h"
 
+#include "mqtt_client.h"
 
 static const int RX_BUF_SIZE = 1024;
 static uint8_t s_led_state = 0;
 static uint8_t s_led_freq = 10; //Hz
 static const char *WIFITAG = "-----[WIFI-AP]";
+static const char *WIFISTA = "-----[WIFI-STA]";
 static const char *MAINTAG = "-----[MAIN]";
+static const char *MQTTTAG = "-----[MQTT]";
+
 #define SW_VERSION_NUMBER "v0.1.7"
 #define SW_VERSION_LENGTH 22
 #define NVS_DEFAULT_NAMESPACE "default_nspc"
@@ -54,7 +63,19 @@ static const char *MAINTAG = "-----[MAIN]";
 #define MAC_ADDRESS_LENGTH 8
 #define DTC_UNSET 0
 #define DTC_SET   1
+#define DEFAULT_RSSI -127
+#define DEFAULT_AUTHMODE WIFI_AUTH_WPA2_PSK
+#define DEFAULT_SCAN_METHOD WIFI_FAST_SCAN
+#define DEFAULT_SORT_METHOD WIFI_CONNECT_AP_BY_SIGNAL
 
+#define WIFI_SSID "HIDDEN__NETWORK"
+#define WIFI_PASSWD "11111112"
+
+#define CONFIG_BROKER_URL "34.126.97.74"
+#define CONFIG_BROKER_PORT 1883
+
+// #define WIFI_SSID "zzzzz"
+// #define WIFI_PASSWD "11111123"
 
 static char SW_VERSION_FULL[SW_VERSION_LENGTH]={0,}; //v1.01.01-yymmdd.hhmmss
 
@@ -350,6 +371,106 @@ void wifi_init_softap(void)
              EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS, EXAMPLE_ESP_WIFI_CHANNEL);
 }
 
+static void event_handler(void* arg, esp_event_base_t event_base,
+                                int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(WIFISTA, "WIFI_EVENT_STA_START");
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t* event = (wifi_event_sta_disconnected_t*) event_data;
+        ESP_LOGI(WIFISTA, "WIFI_EVENT_STA_DISCONNECTED:%d",event->reason);
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(WIFISTA, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    ESP_LOGI(MQTTTAG, "Event dispatched from event loop base=%s, event_id=%d", base, (int)event_id);
+    esp_mqtt_event_handle_t event= (esp_mqtt_event_handle_t) event_data;
+    esp_mqtt_client_handle_t client = event->client;
+    int msg_id;
+    switch ((esp_mqtt_event_id_t)event_id) {
+    case MQTT_EVENT_CONNECTED:
+        ESP_LOGI(MQTTTAG, "MQTT_EVENT_CONNECTED");
+        msg_id = esp_mqtt_client_publish(client, "/b/AaBbCcDdEeFf/default", "data_3", 0, 1, 0);
+        ESP_LOGI(MQTTTAG, "sent publish successful, msg_id=%d", (int)msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client,  "/v/AaBbCcDdEeFf/default", 0);
+        ESP_LOGI(MQTTTAG, "sent subscribe successful, msg_id=%d", (int)msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
+        ESP_LOGI(MQTTTAG, "sent subscribe successful, msg_id=%d", (int)msg_id);
+
+        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
+        ESP_LOGI(MQTTTAG, "sent unsubscribe successful, msg_id=%d", (int)msg_id);
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGI(MQTTTAG, "MQTT_EVENT_DISCONNECTED");
+        break;
+
+    case MQTT_EVENT_SUBSCRIBED:
+        ESP_LOGI(MQTTTAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+        msg_id = esp_mqtt_client_publish(client, "/b/AaBbCcDdEeFf/default", "data", 0, 0, 0);
+        ESP_LOGI(MQTTTAG, "sent publish successful, msg_id=%d", msg_id);
+        break;
+    case MQTT_EVENT_UNSUBSCRIBED:
+        ESP_LOGI(MQTTTAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_PUBLISHED:
+        ESP_LOGI(MQTTTAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_DATA:
+        ESP_LOGI(MQTTTAG, "MQTT_EVENT_DATA");
+        printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+        printf("DATA=%.*s\r\n", event->data_len, event->data);
+        break;
+    case MQTT_EVENT_ERROR:
+        ESP_LOGI(MQTTTAG, "MQTT_EVENT_ERROR");
+        if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+            ESP_LOGI(MQTTTAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
+
+        }
+        break;
+    default:
+        ESP_LOGI(MQTTTAG, "Other event id:%d", event->event_id);
+        break;
+    }
+}
+
+
+/* Initialize Wi-Fi as sta and set scan method */
+static void initWifiStation(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
+
+    // Initialize default station as network interface instance (esp-netif)
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+    assert(sta_netif);
+
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASSWD,
+        },
+    };
+    ESP_LOGI(WIFISTA, "fast_scan . SSID:%s password:%s ",
+             wifi_config.sta.ssid, wifi_config.sta.password);
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
 esp_err_t nvsReadSize(const char *part_name, const char* key, size_t* length ){
     nvs_handle_t my_handle;
     esp_err_t err;
@@ -619,23 +740,45 @@ void initPartitionInfo(void) {
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *configured = esp_ota_get_boot_partition();
     const esp_partition_t *update_partition = NULL;
-    ESP_LOGI(MAINTAG, "Running(0x%08x) configured(0x%08x)", running->address,configured->address);
+    ESP_LOGI(MAINTAG, "Running(0x%08x) configured(0x%08x)", (unsigned int)running->address,(unsigned int)configured->address);
     //This return next ota partition only 0x110000 0x210000, not factory
     update_partition = esp_ota_get_next_update_partition(NULL);
     assert(update_partition != NULL);
-    ESP_LOGI(MAINTAG, "update_partition(0x%08x) configured(0x%08x)", update_partition->address,configured->address);
+    ESP_LOGI(MAINTAG, "update_partition(0x%08x) configured(0x%08x)", (unsigned int)(update_partition->address),(unsigned int)configured->address);
 
     ESP_LOGI(MAINTAG, "Writing to partition subtype %d at offset 0x%x",
-             update_partition->subtype, update_partition->address);
+             update_partition->subtype, (unsigned int)update_partition->address);
     esp_err_t err = esp_ota_set_boot_partition(update_partition);
     configured = esp_ota_get_boot_partition();
     if (err != ESP_OK) {
         ESP_LOGE("MAIN", "esp_ota_set_boot_partition failed (%s)!", esp_err_to_name(err));
     }
-    ESP_LOGI(MAINTAG, "Prepare to restart system! (0x%08x) ",configured->address);
+    ESP_LOGI(MAINTAG, "Prepare to restart system! (0x%08x) ",(unsigned int)configured->address);
     
     // esp_restart();
     ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
+}
+
+void mqtt_app_start(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg ;
+    mqtt_cfg.broker.address.hostname = CONFIG_BROKER_URL;
+    mqtt_cfg.broker.address.port = CONFIG_BROKER_PORT;
+    esp_event_loop_args_t loop_without_task_args = {
+        .queue_size = 5,
+        .task_name = NULL // no task will be created
+    };
+    ESP_ERROR_CHECK(esp_event_loop_create(&loop_without_task_args,));
+    
+    // = {
+    //     .broker.address.hostname = CONFIG_BROKER_URL,
+    // };
+        // .broker.address.port = CONFIG_BROKER_PORT,
+  
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
+    esp_mqtt_client_register_event(client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(client);
 }
 
 int sendData(const char* logName, const char* data)
@@ -692,15 +835,17 @@ extern "C" void app_main(void)
     initConfiguration();
     initPartitionInfo();
 
+    initWifiStation();
+    mqtt_app_start();
+
     ESP_LOGI(MAINTAG,"[%s] System has BOOT_COMPLETED",__FUNCTION__);
 
-
-    ESP_LOGI(WIFITAG, "ESP_WIFI_MODE_AP");
-    wifi_init_softap();
-    ESP_ERROR_CHECK(esp_netif_init());
-    static httpd_handle_t server = NULL;
-
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &connect_handler, &server));
+    // initSoftAp();
+    // ESP_LOGI(WIFITAG, "ESP_WIFI_MODE_AP");
+    // wifi_init_softap();
+    // ESP_ERROR_CHECK(esp_netif_init());
+    // static httpd_handle_t server = NULL;
+    // ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &connect_handler, &server));
 
 
     
@@ -791,25 +936,19 @@ domain is like app id domain, like default, light or switch or door
 client-id is build base on macaddress aa-bb-cc-dd-ee-ff
 
 mqtt message structure:
-sender/header/payload
+client-id/msgType/msgId/payload
 
-sender is client-id
-header=msgType/msgId
 msgType=onewaymsg/replymsg/requestmsg/publicmsg/multicastmsg/subreply/subrequest/subcancel
 msgId= index of msg send to backend
-
-payload=methodName/paramTypeList/paramList/payloadChecksum
+payload=methodName/paramTypeList/paramList
 
 mqtt client id:
 lt=backend:dt=BE[conn.vps-prov]:cut=joynr:uci=lpvcdconnapp16.bmwgroup.net_i0_lpvcdconnapp16
-
 Joynr Client Properties:
 joynr.messaging.mqtt.clientidprefix Must be in format „lt=backend:dt=BE[<joynr-domain-name>]:cut=“ 
 joynr.messaging.receiverid  Must be in format „uci=<hostname>“
-
 Vehicle MQTT Client ID:
 lt=vehicle:dt=ATM2[558926A9A7477700000000000000B3FF]:cut=joynr:uci=b6ec3cde-2319-4301-a200-3e7041bc24f2
 
-mqtt topic: b/f/domain
 
 */
