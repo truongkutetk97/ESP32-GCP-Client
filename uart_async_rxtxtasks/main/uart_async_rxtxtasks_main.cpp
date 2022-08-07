@@ -613,6 +613,7 @@ void initConfiguration(void){
 
     ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
 }
+
 void initPartitionInfo(void) {
 
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -636,6 +637,7 @@ void initPartitionInfo(void) {
     // esp_restart();
     ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
 }
+
 int sendData(const char* logName, const char* data)
 {
     const int len = strlen(data);
@@ -766,5 +768,48 @@ nvs_oa2,    data,  nvs,   0x300000, 0x10000,
 nvs_dtc,    data,  nvs,   0x310000, 0x10000,
 nvs_usr,    data,  nvs,   0x320000, 0x10000,
 nvs_ext,    data,  nvs,   0x330000, 0x50000,
+
+
+
+IPC: RPC and Pub/Sub
+Dirrection: ClusterController <-> Broker <-> BackendApplication
+Component: multi clustercontroller, single broker, single backendApplication, single database
+
+Detail dirrection:
+- ClusterController will feed clientData to Broker via publish
+- Backend will get clientData from Broker via subsribe
+
+topic type:
+b/client-id/domain
+v/client-id/domain
+m/domain
+
+b... :message from ClusterController to backend 
+v... :message from backend to specific ClusterController
+m... :message from backend to multi ClusterController
+domain is like app id domain, like default, light or switch or door
+client-id is build base on macaddress aa-bb-cc-dd-ee-ff
+
+mqtt message structure:
+sender/header/payload
+
+sender is client-id
+header=msgType/msgId
+msgType=onewaymsg/replymsg/requestmsg/publicmsg/multicastmsg/subreply/subrequest/subcancel
+msgId= index of msg send to backend
+
+payload=methodName/paramTypeList/paramList/payloadChecksum
+
+mqtt client id:
+lt=backend:dt=BE[conn.vps-prov]:cut=joynr:uci=lpvcdconnapp16.bmwgroup.net_i0_lpvcdconnapp16
+
+Joynr Client Properties:
+joynr.messaging.mqtt.clientidprefix Must be in format „lt=backend:dt=BE[<joynr-domain-name>]:cut=“ 
+joynr.messaging.receiverid  Must be in format „uci=<hostname>“
+
+Vehicle MQTT Client ID:
+lt=vehicle:dt=ATM2[558926A9A7477700000000000000B3FF]:cut=joynr:uci=b6ec3cde-2319-4301-a200-3e7041bc24f2
+
+mqtt topic: b/f/domain
 
 */
