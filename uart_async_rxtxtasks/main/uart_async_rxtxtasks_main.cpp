@@ -73,11 +73,35 @@ static const char *MQTTTAG = "-----[MQTT]";
 
 #define CONFIG_BROKER_URL "34.126.97.74"
 #define CONFIG_BROKER_PORT 1883
+#define MQTT_CLIENT_ID_LENGTH 18 //ESP32_AABBCCDDEEFF
 
 // #define WIFI_SSID "zzzzz"
 // #define WIFI_PASSWD "11111123"
+// enum{
+//     MQTT_EVENT = 121,
+// }spec_event_t;
+
+typedef enum {
+    MQTT_STATE_INIT = 0,
+    MQTT_STATE_DISCONNECTED,
+    MQTT_STATE_CONNECTED,
+    MQTT_STATE_WAIT_RECONNECT,
+} mqtt_client_state_t;
+
+ESP_EVENT_DECLARE_BASE(MQTT_EVENT);
+ESP_EVENT_DEFINE_BASE(MQTT_EVENT);
 
 static char SW_VERSION_FULL[SW_VERSION_LENGTH]={0,}; //v1.01.01-yymmdd.hhmmss
+static char MQTT_CLIENT_ID[MQTT_CLIENT_ID_LENGTH]={0,}; //ESP32_AABBCCDDEEFF
+static char MQTT_TOPIC_V[40]={0,}; // /b/clientid/default
+static char MQTT_TOPIC_B[40]={0,}; // /v/clientid/default
+#define MQTT_APP_DEFAULT "default"
+#define MQTT_APP_LIGHT "light"
+
+esp_mqtt_client_handle_t mClient;
+static mqtt_client_state_t mMqttState = MQTT_STATE_INIT;
+uint16_t sensorData = 0;
+
 
 #define TXD_PIN (GPIO_NUM_4)
 #define RXD_PIN (GPIO_NUM_5)
@@ -123,7 +147,6 @@ config_param_t GLOBAL_DAS = {
     4  // wifiMeshMaxLayer
 };
 
-
 typedef struct{
     uint8_t INITIAL_FIRMWARE; //= 1; to check whether using default fw or ota firmware
     uint8_t PROVISION_FAILURE ;//= 1;
@@ -146,52 +169,7 @@ dtc_error_t GLOBAL_DTC = {
     1
 };
 
-
-// const char version_yymmdd[6] =
-// {
-//    // YY year
-//    __DATE__[9], __DATE__[10],
-
-//    // First month letter, Oct Nov Dec = '1' otherwise '0'
-//    (__DATE__[0] == 'O' || __DATE__[0] == 'N' || __DATE__[0] == 'D') ? '1' : '0',
-   
-//    // Second month letter
-//    (__DATE__[0] == 'J') ? ( (__DATE__[1] == 'a') ? '1' :       // Jan, Jun or Jul
-//                             ((__DATE__[2] == 'n') ? '6' : '7') ) :
-//    (__DATE__[0] == 'F') ? '2' :                                // Feb 
-//    (__DATE__[0] == 'M') ? (__DATE__[2] == 'r') ? '3' : '5' :   // Mar or May
-//    (__DATE__[0] == 'A') ? (__DATE__[1] == 'p') ? '4' : '8' :   // Apr or Aug
-//    (__DATE__[0] == 'S') ? '9' :                                // Sep
-//    (__DATE__[0] == 'O') ? '0' :                                // Oct
-//    (__DATE__[0] == 'N') ? '1' :                                // Nov
-//    (__DATE__[0] == 'D') ? '2' :                                // Dec
-//    0,
-
-//    // First day letter, replace space with digit
-//    __DATE__[4]==' ' ? '0' : __DATE__[4],
-
-//    // Second day letter
-//    __DATE__[5]
-// };
-// //20:50:45
-// const char version_hhmmss[6+1] =
-// {
-//    // YY year
-//    __TIME__[0], __TIME__[1],
-//    __TIME__[3], __TIME__[4],
-//    __TIME__[6], __TIME__[7],
-//   '\0'
-// };
-
-//v1.0.1
-// const char version_sw[6+1]=
-// {
-//     'v',
-//     '1','.',
-//     '0','.',
-//     '1','\0'
-// };
-
+void initMqttConnection(void);
 
 static esp_err_t ledOFF_handler(httpd_req_t *req)
 {
@@ -223,8 +201,6 @@ static esp_err_t ledON_handler(httpd_req_t *req)
 	else ESP_LOGI(WIFITAG, "Response sent Successfully");
 	return error;
 }
-
-
 
 static const httpd_uri_t root = {
     .uri       = "/",
@@ -374,17 +350,23 @@ void wifi_init_softap(void)
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_LOGI(WIFISTA, "WIFI_EVENT_STA_START");
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t* event = (wifi_event_sta_disconnected_t*) event_data;
-        ESP_LOGI(WIFISTA, "WIFI_EVENT_STA_DISCONNECTED:%d",event->reason);
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(WIFISTA, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-    }
+    if( event_base == WIFI_EVENT){
+        if(event_id == WIFI_EVENT_STA_START){
+            ESP_LOGI(WIFISTA, "WIFI_EVENT_STA_START");
+            esp_wifi_connect();
+        } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            wifi_event_sta_disconnected_t* event = (wifi_event_sta_disconnected_t*) event_data;
+            ESP_LOGI(WIFISTA, "WIFI_EVENT_STA_DISCONNECTED:%d",event->reason);
+            esp_wifi_connect();
+        }
+    } else if (event_base == IP_EVENT){
+        if(event_id == IP_EVENT_STA_GOT_IP){
+            ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+            ESP_LOGI(WIFISTA, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+            initMqttConnection();
+        }
+    } 
+
 }
 
 void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
@@ -395,21 +377,18 @@ void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event
     int msg_id;
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
+        mMqttState = MQTT_STATE_CONNECTED;
         ESP_LOGI(MQTTTAG, "MQTT_EVENT_CONNECTED");
-        msg_id = esp_mqtt_client_publish(client, "/b/AaBbCcDdEeFf/default", "data_3", 0, 1, 0);
+
+        msg_id = esp_mqtt_client_publish(client, MQTT_TOPIC_B, "Client has connected", 0, 1, 0);
         ESP_LOGI(MQTTTAG, "sent publish successful, msg_id=%d", (int)msg_id);
-
-        msg_id = esp_mqtt_client_subscribe(client,  "/v/AaBbCcDdEeFf/default", 0);
+        msg_id = esp_mqtt_client_subscribe(client,  MQTT_TOPIC_V, 0);
         ESP_LOGI(MQTTTAG, "sent subscribe successful, msg_id=%d", (int)msg_id);
-
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
-        ESP_LOGI(MQTTTAG, "sent subscribe successful, msg_id=%d", (int)msg_id);
-
-        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
-        ESP_LOGI(MQTTTAG, "sent unsubscribe successful, msg_id=%d", (int)msg_id);
         break;
+
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(MQTTTAG, "MQTT_EVENT_DISCONNECTED");
+        mMqttState = MQTT_STATE_DISCONNECTED;
         break;
 
     case MQTT_EVENT_SUBSCRIBED:
@@ -417,17 +396,21 @@ void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event
         msg_id = esp_mqtt_client_publish(client, "/b/AaBbCcDdEeFf/default", "data", 0, 0, 0);
         ESP_LOGI(MQTTTAG, "sent publish successful, msg_id=%d", msg_id);
         break;
+
     case MQTT_EVENT_UNSUBSCRIBED:
         ESP_LOGI(MQTTTAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
         break;
+
     case MQTT_EVENT_PUBLISHED:
         ESP_LOGI(MQTTTAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
         break;
+
     case MQTT_EVENT_DATA:
         ESP_LOGI(MQTTTAG, "MQTT_EVENT_DATA");
         printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
         printf("DATA=%.*s\r\n", event->data_len, event->data);
         break;
+
     case MQTT_EVENT_ERROR:
         ESP_LOGI(MQTTTAG, "MQTT_EVENT_ERROR");
         if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
@@ -719,7 +702,14 @@ void initConfiguration(void){
     ESP_LOGI(MAINTAG,"[%s] GLOBAL_DAS::SW_VERSION_FULL=%s",__FUNCTION__, GLOBAL_DAS.swVer);
 
     errStat = esp_read_mac(&GLOBAL_DAS.macAddress[0], ESP_MAC_WIFI_STA);
+    snprintf(MQTT_CLIENT_ID, sizeof(MQTT_CLIENT_ID)+1, "ESP32_%02X%02X%02X%02X%02X%02X",
+         GLOBAL_DAS.macAddress[0], GLOBAL_DAS.macAddress[1], GLOBAL_DAS.macAddress[2],
+         GLOBAL_DAS.macAddress[3], GLOBAL_DAS.macAddress[4], GLOBAL_DAS.macAddress[5]);
+    snprintf(MQTT_TOPIC_V, 4+sizeof(MQTT_CLIENT_ID)+sizeof(MQTT_APP_DEFAULT)+1, "/v/%s/%s",MQTT_CLIENT_ID,MQTT_APP_DEFAULT);
+    snprintf(MQTT_TOPIC_B, 4+sizeof(MQTT_CLIENT_ID)+sizeof(MQTT_APP_DEFAULT)+1, "/b/%s/%s",MQTT_CLIENT_ID,MQTT_APP_DEFAULT);
+    
     ESP_LOGI(MAINTAG,"[%s] GLOBAL_DAS::macAddress="MACSTR,__FUNCTION__, MAC2STR(GLOBAL_DAS.macAddress));
+    ESP_LOGI(MAINTAG,"[%s] Set mqtt client id=%s",__FUNCTION__, MQTT_CLIENT_ID);
 
     errStat = nvsWriteBlob(NVS_PTT_DAS,NVS_DEFAULT_KEY, &GLOBAL_DAS, sizeof(GLOBAL_DAS));
 
@@ -759,26 +749,28 @@ void initPartitionInfo(void) {
     ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
 }
 
-void mqtt_app_start(void)
+void initMqttConnection(void)
 {
-    esp_mqtt_client_config_t mqtt_cfg ;
+    esp_mqtt_client_config_t mqtt_cfg ={0,};
     mqtt_cfg.broker.address.hostname = CONFIG_BROKER_URL;
     mqtt_cfg.broker.address.port = CONFIG_BROKER_PORT;
-    esp_event_loop_args_t loop_without_task_args = {
-        .queue_size = 5,
-        .task_name = NULL // no task will be created
-    };
-    ESP_ERROR_CHECK(esp_event_loop_create(&loop_without_task_args,));
-    
-    // = {
-    //     .broker.address.hostname = CONFIG_BROKER_URL,
+    mqtt_cfg.broker.address.transport = MQTT_TRANSPORT_OVER_TCP;
+    mqtt_cfg.credentials.client_id = MQTT_CLIENT_ID;
+
+    // esp_event_loop_args_t loop_without_task_args = {
+    //     .queue_size = 5,
+    //     .task_name = NULL // no task will be created
+    // };
+    // ESP_ERROR_CHECK(esp_event_loop_create(&loop_without_task_args,));
+    // esp_mqtt_client_config_t mqtt_cfg  = {
+    //     .broker.address.uri = "mqtt://34.126.97.74:1883",
     // };
         // .broker.address.port = CONFIG_BROKER_PORT,
-  
-    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
-    /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
-    esp_mqtt_client_register_event(client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    esp_mqtt_client_start(client);
+    // esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    mClient = esp_mqtt_client_init(&mqtt_cfg);
+    
+    esp_mqtt_client_register_event(mClient, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(mClient);
 }
 
 int sendData(const char* logName, const char* data)
@@ -825,6 +817,21 @@ static void blink_task(void *arg)
     }
 }
 
+static void mqtt_client_task(void *arg)
+{
+    while (1) {
+        if(mMqttState == MQTT_STATE_CONNECTED){
+            char tempMsg[50]={0,};
+            snprintf(tempMsg, 17, "Sensor data 1:%hu",sensorData++);
+            esp_mqtt_client_publish(mClient, MQTT_TOPIC_B, tempMsg , 0, 0, 0);
+            ESP_LOGI(MQTTTAG,"[%s] Sending message:%s",__FUNCTION__,tempMsg);
+            
+        }
+        uint16_t delayPeriod = 500/2;
+        vTaskDelay(delayPeriod / portTICK_PERIOD_MS);        
+    }
+}
+
 extern "C" void app_main(void)
 {
     initVersion();
@@ -836,7 +843,6 @@ extern "C" void app_main(void)
     initPartitionInfo();
 
     initWifiStation();
-    mqtt_app_start();
 
     ESP_LOGI(MAINTAG,"[%s] System has BOOT_COMPLETED",__FUNCTION__);
 
@@ -852,6 +858,7 @@ extern "C" void app_main(void)
     xTaskCreate(blink_task, "blink_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(rx_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
+    xTaskCreate(mqtt_client_task, "mqtt_client_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL);
 }
 
 
