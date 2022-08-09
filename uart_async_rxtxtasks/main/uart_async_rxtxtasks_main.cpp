@@ -30,6 +30,7 @@
 #include "esp_wifi.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
+#include "lwip/inet.h"
 #include "esp_err.h"
 #include <sys/param.h>
 #include "esp_netif.h"
@@ -43,6 +44,8 @@
 #include "lwip/netdb.h"
 
 #include "mqtt_client.h"
+#include "ping/ping_sock.h"
+#include "esp_heap_caps.h"
 
 static const int RX_BUF_SIZE = 1024;
 static uint8_t s_led_state = 0;
@@ -51,6 +54,7 @@ static const char *WIFITAG = "-----[WIFI-AP]";
 static const char *WIFISTA = "-----[WIFI-STA]";
 static const char *MAINTAG = "-----[MAIN]";
 static const char *MQTTTAG = "-----[MQTT]";
+static const char *ICMPTAG = "-----[PING]";
 
 #define SW_VERSION_NUMBER "v0.1.7"
 #define SW_VERSION_LENGTH 22
@@ -170,6 +174,7 @@ dtc_error_t GLOBAL_DTC = {
 };
 
 void initMqttConnection(void);
+void initIcmp();
 
 static esp_err_t ledOFF_handler(httpd_req_t *req)
 {
@@ -347,6 +352,46 @@ void wifi_init_softap(void)
              EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS, EXAMPLE_ESP_WIFI_CHANNEL);
 }
 
+static void test_on_ping_success(esp_ping_handle_t hdl, void *args)
+{
+    // optionally, get callback arguments
+    // const char* str = (const char*) args;
+    // printf("%s\r\n", str); // "foo"
+    uint8_t ttl;
+    uint16_t seqno;
+    uint32_t elapsed_time, recv_len;
+    ip_addr_t target_addr;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TTL, &ttl, sizeof(ttl));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR, &target_addr, sizeof(target_addr));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SIZE, &recv_len, sizeof(recv_len));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed_time, sizeof(elapsed_time));
+    ESP_LOGI(ICMPTAG, "%d bytes from %s icmp_seq=%d ttl=%d time=%d ms",
+           (int)recv_len, inet_ntoa(target_addr.u_addr.ip4), (int)seqno, (int)ttl, (int)elapsed_time);
+
+}
+
+static void test_on_ping_timeout(esp_ping_handle_t hdl, void *args)
+{
+    uint16_t seqno;
+    ip_addr_t target_addr;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR, &target_addr, sizeof(target_addr));
+    ESP_LOGI(ICMPTAG, "From %s icmp_seq=%d timeout", inet_ntoa(target_addr.u_addr.ip4), (int)seqno);
+}
+
+static void test_on_ping_end(esp_ping_handle_t hdl, void *args)
+{
+    uint32_t transmitted;
+    uint32_t received;
+    uint32_t total_time_ms;
+
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REQUEST, &transmitted, sizeof(transmitted));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &received, sizeof(received));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_DURATION, &total_time_ms, sizeof(total_time_ms));
+    ESP_LOGI(ICMPTAG, "%d packets transmitted, %d received, time %dms", (int)transmitted, (int)received, (int)total_time_ms);
+}
+
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
 {
@@ -364,6 +409,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
             ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
             ESP_LOGI(WIFISTA, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
             initMqttConnection();
+            initIcmp();
         }
     } 
 
@@ -773,6 +819,34 @@ void initMqttConnection(void)
     esp_mqtt_client_start(mClient);
 }
 
+void initIcmp()
+{
+    ip_addr_t target_addr;
+    ip4_addr_t target_addr4;
+    
+    ip4addr_aton(CONFIG_BROKER_URL, &target_addr4);
+    memcpy(&target_addr,&target_addr4,sizeof(target_addr4));
+
+    ESP_LOGI(ICMPTAG, "ipaddr:%s ipaddr4:%s"
+        ,inet_ntoa(target_addr.u_addr.ip4),inet_ntoa(target_addr4.addr));
+
+    esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
+    ping_config.target_addr = target_addr;          // target IP address
+    ping_config.count = ESP_PING_COUNT_INFINITE;    // ping in infinite mode, esp_ping_stop can stop it
+
+    /* set callback functions */
+    esp_ping_callbacks_t cbs;
+    cbs.on_ping_success = test_on_ping_success;
+    cbs.on_ping_timeout = test_on_ping_timeout;
+    cbs.on_ping_end = test_on_ping_end;
+    // cbs.cb_args = (void*)"foo";  // arguments that will feed to all callback functions, can be NULL
+    // cbs.cb_args = eth_event_group;
+    cbs.cb_args = NULL;
+    esp_ping_handle_t ping;
+    esp_ping_new_session(&ping_config, &cbs, &ping);
+    esp_ping_start(ping);
+}
+
 int sendData(const char* logName, const char* data)
 {
     const int len = strlen(data);
@@ -825,7 +899,10 @@ static void mqtt_client_task(void *arg)
             snprintf(tempMsg, 17, "Sensor data 1:%hu",sensorData++);
             esp_mqtt_client_publish(mClient, MQTT_TOPIC_B, tempMsg , 0, 0, 0);
             ESP_LOGI(MQTTTAG,"[%s] Sending message:%s",__FUNCTION__,tempMsg);
-            
+            ESP_LOGI(MQTTTAG,"[%s] FreeHeap:%d InternalHeap:%d Minimum free:%d ",__FUNCTION__,
+                heap_caps_get_free_size( MALLOC_CAP_DEFAULT ),
+                heap_caps_get_free_size( MALLOC_CAP_8BIT | MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL ),
+                heap_caps_get_minimum_free_size( MALLOC_CAP_DEFAULT ));
         }
         uint16_t delayPeriod = 500/2;
         vTaskDelay(delayPeriod / portTICK_PERIOD_MS);        
@@ -957,5 +1034,8 @@ joynr.messaging.receiverid  Must be in format „uci=<hostname>“
 Vehicle MQTT Client ID:
 lt=vehicle:dt=ATM2[558926A9A7477700000000000000B3FF]:cut=joynr:uci=b6ec3cde-2319-4301-a200-3e7041bc24f2
 
+tmperature not working
+sending ping and memory remain to server
+init a message queue or event loop to process message async
 
 */
