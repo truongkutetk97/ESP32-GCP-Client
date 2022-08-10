@@ -55,6 +55,7 @@ static const char *WIFISTA = "-----[WIFI-STA]";
 static const char *MAINTAG = "-----[MAIN]";
 static const char *MQTTTAG = "-----[MQTT]";
 static const char *ICMPTAG = "-----[PING]";
+static const char *QUEUETAG = "-----[QUEUE]";
 
 #define SW_VERSION_NUMBER "v0.1.7"
 #define SW_VERSION_LENGTH 22
@@ -92,8 +93,18 @@ typedef enum {
     MQTT_STATE_WAIT_RECONNECT,
 } mqtt_client_state_t;
 
+enum {
+    MESSAGE_WATCH_DOG_TIMER = 1,
+    MESSAGE_CLOUD_CONNECTION_CHECKER,
+    MESSAGE_SEND_MQTT_MESSAGE
+};
+
 ESP_EVENT_DECLARE_BASE(MQTT_EVENT);
 ESP_EVENT_DEFINE_BASE(MQTT_EVENT);
+
+ESP_EVENT_DECLARE_BASE(MAIN_EVENT);
+ESP_EVENT_DEFINE_BASE(MAIN_EVENT);
+
 
 static char SW_VERSION_FULL[SW_VERSION_LENGTH]={0,}; //v1.01.01-yymmdd.hhmmss
 static char MQTT_CLIENT_ID[MQTT_CLIENT_ID_LENGTH]={0,}; //ESP32_AABBCCDDEEFF
@@ -105,6 +116,8 @@ static char MQTT_TOPIC_B[40]={0,}; // /v/clientid/default
 esp_mqtt_client_handle_t mClient;
 static mqtt_client_state_t mMqttState = MQTT_STATE_INIT;
 uint16_t sensorData = 0;
+esp_event_loop_handle_t loop_with_task;
+int mPingStatus = 0;
 
 
 #define TXD_PIN (GPIO_NUM_4)
@@ -354,42 +367,19 @@ void wifi_init_softap(void)
 
 static void test_on_ping_success(esp_ping_handle_t hdl, void *args)
 {
-    // optionally, get callback arguments
-    // const char* str = (const char*) args;
-    // printf("%s\r\n", str); // "foo"
-    uint8_t ttl;
-    uint16_t seqno;
-    uint32_t elapsed_time, recv_len;
-    ip_addr_t target_addr;
-    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
-    esp_ping_get_profile(hdl, ESP_PING_PROF_TTL, &ttl, sizeof(ttl));
-    esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR, &target_addr, sizeof(target_addr));
-    esp_ping_get_profile(hdl, ESP_PING_PROF_SIZE, &recv_len, sizeof(recv_len));
+    // uint16_t seqno;
+    // esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
+    uint32_t elapsed_time;
     esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed_time, sizeof(elapsed_time));
-    ESP_LOGI(ICMPTAG, "%d bytes from %s icmp_seq=%d ttl=%d time=%d ms",
-           (int)recv_len, inet_ntoa(target_addr.u_addr.ip4), (int)seqno, (int)ttl, (int)elapsed_time);
-
+    mPingStatus = (int)elapsed_time;
 }
 
 static void test_on_ping_timeout(esp_ping_handle_t hdl, void *args)
 {
-    uint16_t seqno;
-    ip_addr_t target_addr;
-    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
-    esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR, &target_addr, sizeof(target_addr));
-    ESP_LOGI(ICMPTAG, "From %s icmp_seq=%d timeout", inet_ntoa(target_addr.u_addr.ip4), (int)seqno);
 }
 
 static void test_on_ping_end(esp_ping_handle_t hdl, void *args)
 {
-    uint32_t transmitted;
-    uint32_t received;
-    uint32_t total_time_ms;
-
-    esp_ping_get_profile(hdl, ESP_PING_PROF_REQUEST, &transmitted, sizeof(transmitted));
-    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &received, sizeof(received));
-    esp_ping_get_profile(hdl, ESP_PING_PROF_DURATION, &total_time_ms, sizeof(total_time_ms));
-    ESP_LOGI(ICMPTAG, "%d packets transmitted, %d received, time %dms", (int)transmitted, (int)received, (int)total_time_ms);
 }
 
 static void event_handler(void* arg, esp_event_base_t event_base,
@@ -424,6 +414,7 @@ void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         mMqttState = MQTT_STATE_CONNECTED;
+        s_led_freq = 2;
         ESP_LOGI(MQTTTAG, "MQTT_EVENT_CONNECTED");
 
         msg_id = esp_mqtt_client_publish(client, MQTT_TOPIC_B, "Client has connected", 0, 1, 0);
@@ -433,6 +424,7 @@ void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event
         break;
 
     case MQTT_EVENT_DISCONNECTED:
+        s_led_freq = 10;
         ESP_LOGI(MQTTTAG, "MQTT_EVENT_DISCONNECTED");
         mMqttState = MQTT_STATE_DISCONNECTED;
         break;
@@ -470,7 +462,20 @@ void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event
     }
 }
 
+static void handle_message(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
 
+    if(event_base == MAIN_EVENT){
+        if( event_id == MESSAGE_WATCH_DOG_TIMER){
+            int tempBuffer = *((int*) event_data);
+            ESP_LOGI(QUEUETAG,"[%s] %d %d",__FUNCTION__, (int)event_id,(int)tempBuffer);
+
+        }else ESP_LOGI(QUEUETAG,"[%s] Unknown message:%d",__FUNCTION__, (int)event_id);
+
+    }else ESP_LOGI(QUEUETAG,"[%s] Unknown event base",__FUNCTION__);
+
+
+}
 /* Initialize Wi-Fi as sta and set scan method */
 static void initWifiStation(void)
 {
@@ -845,22 +850,33 @@ void initIcmp()
     esp_ping_handle_t ping;
     esp_ping_new_session(&ping_config, &cbs, &ping);
     esp_ping_start(ping);
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
 }
 
-int sendData(const char* logName, const char* data)
+void initMainHandler()
 {
-    const int len = strlen(data);
-    const int txBytes = uart_write_bytes(UART_NUM_1, data, len);
-    ESP_LOGI(logName, "Wrote %d bytes", txBytes);
-    return txBytes;
+
+    esp_event_loop_args_t loop_with_task_args = {
+        .queue_size = 5,
+        .task_name = "MainHandler", // task will be created
+        .task_priority = uxTaskPriorityGet(NULL),
+        .task_stack_size = 3072,
+        .task_core_id = tskNO_AFFINITY
+    };
+
+    ESP_ERROR_CHECK(esp_event_loop_create(&loop_with_task_args, &loop_with_task));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register_with(loop_with_task, MAIN_EVENT, MESSAGE_WATCH_DOG_TIMER, handle_message, loop_with_task, NULL));
+
+    ESP_LOGI(MAINTAG,"[%s] Done",__FUNCTION__);
 }
+
+
 
 static void tx_task(void *arg)
 {
     static const char *TX_TASK_TAG = "TX_TASK";
     esp_log_level_set(TX_TASK_TAG, ESP_LOG_INFO);
     while (1) {
-        sendData(TX_TASK_TAG, "Hello world");
         vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
 }
@@ -895,16 +911,16 @@ static void mqtt_client_task(void *arg)
 {
     while (1) {
         if(mMqttState == MQTT_STATE_CONNECTED){
-            char tempMsg[50]={0,};
-            snprintf(tempMsg, 17, "Sensor data 1:%hu",sensorData++);
+            int heapSize = heap_caps_get_free_size( MALLOC_CAP_DEFAULT );
+            uint32_t upTime = esp_log_timestamp();
+            char tempMsg[30]={0,};
+            snprintf(tempMsg, 25, "/%ld/%hu/%hu/",upTime, mPingStatus, heapSize);
             esp_mqtt_client_publish(mClient, MQTT_TOPIC_B, tempMsg , 0, 0, 0);
             ESP_LOGI(MQTTTAG,"[%s] Sending message:%s",__FUNCTION__,tempMsg);
-            ESP_LOGI(MQTTTAG,"[%s] FreeHeap:%d InternalHeap:%d Minimum free:%d ",__FUNCTION__,
-                heap_caps_get_free_size( MALLOC_CAP_DEFAULT ),
-                heap_caps_get_free_size( MALLOC_CAP_8BIT | MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL ),
-                heap_caps_get_minimum_free_size( MALLOC_CAP_DEFAULT ));
+            ESP_ERROR_CHECK(esp_event_post_to(loop_with_task, MAIN_EVENT, MESSAGE_WATCH_DOG_TIMER, &heapSize, sizeof(heapSize), portMAX_DELAY));
+
         }
-        uint16_t delayPeriod = 500/2;
+        uint16_t delayPeriod = 1000*1;
         vTaskDelay(delayPeriod / portTICK_PERIOD_MS);        
     }
 }
@@ -920,6 +936,7 @@ extern "C" void app_main(void)
     initPartitionInfo();
 
     initWifiStation();
+    initMainHandler();
 
     ESP_LOGI(MAINTAG,"[%s] System has BOOT_COMPLETED",__FUNCTION__);
 

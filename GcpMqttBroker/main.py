@@ -43,7 +43,7 @@ GcpClientMsgIndex = 0
 
 def on_message(client, userdata, message):
     payload = message.payload.decode("utf-8")
-    logging.info("[GcpClient]+++ < received message: {}".format( payload))
+    logging.info("[GcpClient]+++ < received message: {}/{}".format(message.topic, payload))
     # if payload ... :
     #     task_queue.put(...)
 
@@ -98,7 +98,7 @@ def send_ack_msg():
 def process_subscribe():
     #subscribe to topic b, which clustercontroller will send message to
     logging.info("[GcpClient]+++ subscribe to b topic")
-    client.subscribe("b/#")
+    client.subscribe("/b/#")
 
 def publish(topic, message, wait_for_ack = False):
     QoS = 2 if wait_for_ack else 0
